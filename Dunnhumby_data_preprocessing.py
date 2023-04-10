@@ -3,24 +3,29 @@ import numpy as np
 import csv
 import os
 import sys
+import pdb
+from tqdm import tqdm
 
 def main(argv):
-
-    # path = '../Minnemudac/dunnhumby_50k/'
-    path = argv[1]
+    # pdb.set_trace()
+    path = '../../datasets/dunnhumby_50k/'
+    # path = argv[1]
     print('Preprocessing...')
     files = os.listdir(path)
     date_attr = 1
     mat_attr = 6
     user_attr = 11
 
-    pid_hash = {}
+    item_set = {} # 统计一下个数
     usr_oid_map = []
     file_count = 0
-    usr_oid_record = {}
-    for fid in range(len(files)):
+    usr_oid_record = {} # {uid:{data1:[], data2:[], ...}} # main DS
+    for fid in tqdm(range(len(files))):
+    # for fid in tqdm(range(10)):
         count = 0
         with open(path + files[fid], 'r') as csvfile:
+            if (files[fid] == "time.csv"):
+                continue
             reader = csv.reader(csvfile, delimiter=',', quotechar='|')
             for row in reader:
                 if count == 0:
@@ -29,9 +34,12 @@ def main(argv):
                 uid = row[user_attr]
                 mid = row[mat_attr]
                 str_date = row[date_attr]
+                if (uid == "" or mid == "" or str_date == ""):
+                    # print("empty uid mid or str_data")
+                    continue
                 date = int(str_date)
-                if mid not in pid_hash:
-                    pid_hash[mid] = 1
+                if mid not in item_set:
+                    item_set[mid] = 1
                 if uid not in usr_oid_record:
                     usr_oid_record[uid] = {}
                 if date not in usr_oid_record[uid]:
@@ -39,19 +47,23 @@ def main(argv):
                 usr_oid_record[uid][date].append(mid)
                 count += 1
         file_count += 1
-
+    # pdb.set_trace()
     average_records = 0
     num_more_than_two_records = 0
     num_more_than_three_records = 0
+    num_more_than_five_records = 0
     num = 0
     for uid in usr_oid_record.keys():
-        num_records = len(usr_oid_record[uid].keys())
+        num_records = len(usr_oid_record[uid].keys()) # session num per user
 
         if num_records >= 2:
             average_records += num_records
             num_more_than_two_records += 1
         if num_records >= 3:
             num_more_than_three_records += 1
+        if num_records >= 5:
+            num_more_than_five_records += 1
+        
 
     average_records = average_records / num_more_than_two_records
 
@@ -62,14 +74,14 @@ def main(argv):
     print('Average records: ' + str(average_records))
     print('More than one record: ' + str(num_more_than_two_records))
     print('More than two records: ' + str(num_more_than_three_records))
-    usr_oid_map.append(usr_oid_record)
+    # usr_oid_map.append(usr_oid_record)
 
     num_users = 50000
     count = 0
-    print('Total '+str(len(pid_hash.keys()))+' items')
+    print('Total '+str(len(item_set.keys()))+' items')
 
     headers = ['CUSTOMER_ID','ORDER_NUMBER','MATERIAL_NUMBER']
-    path = './'
+    path = './my_data/'
 
     # history_file = 'Dunnhumby_history_order_original.csv'
     # history_file = 'Dunnhumby_history_order_original_10_steps.csv'
@@ -79,13 +91,14 @@ def main(argv):
         writer.writerow(headers)
         for uid in usr_oid_record.keys():
             if count > num_users:
+                print("what???")
                 break
-            if len(usr_oid_record[uid]) > 1:
+            if len(usr_oid_record[uid]) > 1: # at least 8 sessions
                 dates = usr_oid_record[uid].keys()
                 sort_date = np.sort(list(dates))
                 if len(sort_date) >= 8:
                     # for i in range(0,5):
-                    for i in range(0, 5):
+                    for i in range(0, 5): # first 5 session is history
                         date = sort_date[i]
                         for item in usr_oid_record[uid][date]:
                             row = []
@@ -109,7 +122,7 @@ def main(argv):
                 dates = usr_oid_record[uid].keys()
                 sort_date = np.sort(list(dates))
                 if len(sort_date) >= 8:
-                    for i in range(5,8):
+                    for i in range(5,8): # last 3 for future
                         date = sort_date[i]
                         for item in usr_oid_record[uid][date]:
                             row = []
@@ -118,7 +131,7 @@ def main(argv):
                             row.append(item)
                             writer.writerow(row)
             count += 1
-
+    
     print('Partition the data...')
     attributes_list = ['MATERIAL_NUMBER']
     # files = ['BA_history_order_original.csv', 'BA_future_order_original.csv']
@@ -133,7 +146,7 @@ def main(argv):
     # print('finish dictionary generation*****')
 
 
-
+    # pdb.set_trace()
     total_num = 0
     item_map = {}
     #data_chunk, input_size, code_freq_at_first_claim = BasketAnalysis_claim2vector.read_claim2vector_embedding_file(files)
@@ -150,7 +163,7 @@ def main(argv):
     import operator
     sorted_x = sorted(item_map.items(), key=operator.itemgetter(1))
 
-    topk = 6000
+    topk = 6000 # Total 4997 items, actually useless
 
     topk_num = 0
     count = 0
@@ -161,7 +174,7 @@ def main(argv):
         topk_dictionary[sorted_x[-1-idx][0]] = 1
         topk_num += sorted_x[-1-idx][1]
     print('Percentage of the top '+str(topk)+' items: ' + str(topk_num/total_num))
-
+    pdb.set_trace()
     history = []
     future = []
     history_keys = {}
@@ -191,7 +204,7 @@ def main(argv):
     # files = ['Dunnhumby_history_order.csv', 'Dunnhumby_future_order.csv']
     # files = ['Dunnhumby_history_order_10_steps.csv', 'Dunnhumby_future_order_10_steps.csv']
     # files = ['Dunnhumby_history_order_10_steps_50kuser.csv', 'Dunnhumby_future_order_10_steps_50kuser.csv']
-    files = [argv[2],argv[3]]
+    # files = [argv[2],argv[3]]
     headers = ['CUSTOMER_ID','ORDER_NUMBER','MATERIAL_NUMBER']
     with open(path + files[0], 'w') as csvfile:
         writer = csv.writer(csvfile)
