@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import pdb
 import config
 from datasets import BasketData
+from tqdm import tqdm
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 num_iter = 10
 
@@ -147,7 +149,7 @@ class AttnDecoderRNN_new(nn.Module):
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input, hidden, encoder_outputs, history_record, last_hidden):
-        pdb.set_trace()
+        # pdb.set_trace()
         if use_embedding:
             list = Variable(torch.LongTensor(input).view(-1, 1))
             if use_cuda:
@@ -267,222 +269,86 @@ class custom_MultiLabelLoss_torch(nn.modules.loss._Loss):
         #loss = mseloss
         return loss
 
-# 把文件的itemid格式映射成数字
-def generate_dictionary_BA(path, files, attributes_list):
-    # path = '../Minnemudac/'
-    # files = ['Coborn_history_order.csv','Coborn_future_order.csv']
-    # files = ['BA_history_order.csv', 'BA_future_order.csv']
-    # attributes_list = ['MATERIAL_NUMBER']
-    dictionary_table = {}
-    counter_table = {}
-    for attr in attributes_list:
-        dictionary = {}
-        dictionary_table[attr] = dictionary
-        counter_table[attr] = 0
+class BasketTrans(nn.Module):
+    def __init__(self, item_embedding):
+        super(BasketTrans, self).__init__()
+    
+        self.item_embedding = item_embedding
 
-    csv.field_size_limit(sys.maxsize)
-    for filename in files:
-        count = 0
-        with open(path + filename, 'r') as csvfile:
-            reader = csv.reader(csvfile, delimiter=',', quotechar='|')
-            for row in reader:
-                if count == 0:
-                    count += 1
-                    continue
-                key = attributes_list[0]
-                if row[2] not in dictionary_table[key]:
-                    dictionary_table[key][row[2]] = counter_table[key]
-                    counter_table[key] = counter_table[key] + 1
-                    count += 1
+    def forward(self, S):
+        # S: B * BN(?) * BS
+        S = [s[-1] for s in S] # S: B * BS
+        S = torch.tensor(S, dtype=torch.long)
+        if use_cuda:
+            S = S.cuda()
+        ret = self.item_embedding(S) # B * BS * E
+        return torch.sum(ret, dim=1) # B * E
 
-    print(counter_table)
+        
 
-    total = 0
-    for key in counter_table.keys():
-        total = total + counter_table[key]
-
-    print('# dimensions of final vector: ' + str(total) + ' | ' + str(count - 1))
-
-    return dictionary_table, total, counter_table
+class BasketABAModel(nn.Module):
+    def __init__(self, item_num, user_num, args):
+        super(BasketABAModel, self).__init__()
+        self.item_num = item_num
+        self.user_num = user_num
+        self.item_embedding = nn.Embedding(self.item_num, args.hidden_size)
+        self.usr_embedding = nn.Embedding(self.user_num, args.hidden_size)
+        self.encoder = BasketTrans(self.item_embedding)
 
 
-def read_claim2vector_embedding_file_no_vector(path, files):
-    pdb.set_trace()
-    # attributes_list = ['DRG', 'PROVCAT ', 'RVNU_CD', 'DIAG', 'PROC']
-    attributes_list = ['MATERIAL_NUMBER']
-    # path = '../Minnemudac/'
-    print('start dictionary generation...')
-    dictionary_table, num_dim, counter_table = generate_dictionary_BA(path, files, attributes_list)
-    print('finish dictionary generation*****')
-    usr_attr = 'CUSTOMER_ID'
-    ord_attr = 'ORDER_NUMBER'
+    def forward(self, item):
+        U, S, A, B, L1, L2, L3 = item
+        # pdb.set_trace()
+        
+        U = torch.tensor(U, dtype=torch.long)
+        A = torch.tensor(A, dtype=torch.long)
+        B = torch.tensor(B, dtype=torch.long)
+        
+        if use_cuda:
+            U = U.cuda()
+            A = A.cuda()
+            B = B.cuda()
+        seq_emb = self.encoder(S)
+        usr_emb = self.usr_embedding(U)
+        
+        itemA_emb = self.item_embedding(A)
+        itemB_emb = self.item_embedding(B)
+        # pdb.set_trace()
+        try:
+            logit = torch.matmul((usr_emb + seq_emb), itemA_emb.T)
+        except Exception as e:
+            pdb.set_trace()
+            print("here")
+        # pred = torch.sigmoid(logit) # B * 1
+        return logit
+    
+    def eval_all(self, item):
+        U, S, A_busk, _ = item
+        U = torch.tensor([U], dtype=torch.long)
+        if use_cuda:
+            U = U.cuda()
+        seq_emb = self.encoder([S]) # 1 * E
+        usr_emb = self.usr_embedding(U) # 1 * E
+        
+        all_item = self.item_embedding.weight # N * E
 
-    # dictionary_table, num_dim, counter_table = GDF.generate_dictionary(attributes_list)
+        logit = torch.matmul((usr_emb + seq_emb), all_item.T) # 1 * N
+        pred = torch.sigmoid(logit) # 1 * N
 
-    freq_max = 200
-    ## all the follow three ways array. First index is patient, second index is the time step, third is the feature vector
-    data_chunk = []
-    day_gap_counter = []
-    claims_counter = 0
-    num_claim = 0
-    code_freq_at_first_claim = np.zeros(num_dim + 2) # num_dim是item数，冷启动频率？这个论文里提出的一个贡献点
+        return pred
 
-    for file_id in range(len(files)):
-
-        count = 0
-        data_chunk.append({})
-        filename = files[file_id]
-        with open(path + filename, 'r') as csvfile:
-            # gap_within_one_year = np.zeros(365)
-            reader = csv.DictReader(csvfile)
-            last_pid_date = '*'
-            last_pid = '-1'
-            last_days = -1
-            # 2 more elements in the end for start and end states
-            feature_vector = []
-            for row in reader:
-                cur_pid_date = row[usr_attr] + '_' + row[ord_attr]
-                cur_pid = row[usr_attr]
-                # cur_days = int(row[ord_attr])
-
-                if cur_pid != last_pid:
-                    # start state
-                    tmp = [-1]
-                    data_chunk[file_id][cur_pid] = []
-                    data_chunk[file_id][cur_pid].append(tmp)
-                    num_claim = 0
-
-                if cur_pid_date not in last_pid_date:
-                    if last_pid_date not in '*' and last_pid not in '-1':
-                        sorted_feature_vector = np.sort(feature_vector)
-                        data_chunk[file_id][last_pid].append(sorted_feature_vector)
-                        if len(sorted_feature_vector) > 0:
-                            count = count + 1
-                        # data_chunk[file_id][last_pid].append(feature_vector)
-                    feature_vector = []
-
-                    claims_counter = 0
-                if cur_pid != last_pid:
-                    # end state
-                    if last_pid not in '-1':
-                        tmp = [-1]
-                        data_chunk[file_id][last_pid].append(tmp)
-
-                key = attributes_list[0]
-
-                within_idx = dictionary_table[key][row[key]]
-                previous_idx = 0
-
-                for j in range(attributes_list.index(key)):
-                    previous_idx = previous_idx + counter_table[attributes_list[j]]
-                idx = within_idx + previous_idx
-
-                # set corresponding dimention to 1
-                if idx not in feature_vector:
-                    feature_vector.append(idx)
-
-                last_pid_date = cur_pid_date
-                last_pid = cur_pid
-                # last_days = cur_days
-                if file_id == 1:
-                    claims_counter = claims_counter + 1
-
-            if last_pid_date not in '*' and last_pid not in '-1':
-                data_chunk[file_id][last_pid].append(np.sort(feature_vector))
-        print('num of vectors having entries more than 1: ' + str(count))
-
-    return data_chunk, num_dim + 2, code_freq_at_first_claim
-
-
-def train(input_variable, target_variable, encoder, decoder, codes_inverse_freq, encoder_optimizer, decoder_optimizer,
-          criterion, output_size, next_k_step, max_length=MAX_LENGTH):
-    encoder_hidden = encoder.initHidden()
-
-    encoder_optimizer.zero_grad()
-    decoder_optimizer.zero_grad()
-
-    input_length = len(input_variable)
-    target_length = len(target_variable)
-
-    encoder_outputs = Variable(torch.zeros(max_length, encoder.hidden_size))
-    if use_cuda:
-        encoder_outputs = encoder_outputs.cuda()
-
-    loss = 0
-
-    history_record = np.zeros(output_size)
-    for ei in range(input_length - 1):
-        if ei == 0:
-            continue
-        for ele in input_variable[ei]:
-            history_record[ele] += 1 / (input_length - 2)
-
-    for ei in range(input_length - 1):
-        if ei == 0:
-            continue
-        encoder_output, encoder_hidden = encoder(input_variable[ei], encoder_hidden) # here encoder
-        encoder_outputs[ei - 1] = encoder_output[0][0]
-
-    last_input = input_variable[input_length - 2]
-    decoder_hidden = encoder_hidden
-    last_hidden = encoder_hidden
-    use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
-
-    num_str = 0
-    topk = 1
-    max_len = 5
-
-    if next_k_step > 0:
-        if next_k_step <= target_length - 2:
-            max_step = next_k_step
-        else:
-            max_step = target_length - 2
-    else:
-        max_step = target_length - 1
-        max_step = min(target_length - 2, max_len)
-    decoder_input = last_input
-
-    for di in range(max_step):
-
-        if atten_decoder:
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs, history_record, last_hidden)
-        else:
-            decoder_output, decoder_hidden = decoder(
-                decoder_input, decoder_hidden)
-        topv, topi = decoder_output.data.topk(topk)
-        ni = topi[0][0]
-
-        # activation_bound
-        # topk_labels
-        # target_neg = zero2neg(target_variable[di])
-
-        vectorized_target = np.zeros(output_size)
-        for idx in target_variable[di + 1]:
-            vectorized_target[idx] = 1
-
-        target = Variable(torch.FloatTensor(vectorized_target).view(1, -1))
+class BucketABALoss(nn.modules.loss._Loss):
+    def __init__(self):
+        super(BucketABALoss, self).__init__()
+        self.loss = nn.CrossEntropyLoss()
+    
+    def forward(self, logit, item):
+        # pdb.set_trace()
+        target = [0 if x == -1 else x for x in item[-3]]
+        target = torch.tensor(target, dtype=torch.long)
         if use_cuda:
             target = target.cuda()
-        weights = Variable(torch.FloatTensor(codes_inverse_freq).view(1, -1))
-        if use_cuda:
-            weights = weights.cuda()
-
-        tt = criterion(decoder_output, target, weights)
-        # tt = torch.sum(weights*torch.pow((decoder_output - target),2))
-        loss += tt
-
-        decoder_input = target_variable[di + 1]
-        # loss += multilable_loss(decoder_output, target)
-
-    # encoder_optimizer.zero_grad()
-    # decoder_optimizer.zero_grad()
-    loss.backward()
-
-    encoder_optimizer.step()
-    decoder_optimizer.step()
-
-    return loss.item() / target_length
+        return self.loss(logit, target)
 
 
 ######################################################################
@@ -508,85 +374,44 @@ def timeSince(since, percent):
     return '%s (- %s)' % (asMinutes(s), asMinutes(rs))
 
 
-def trainIters(data_chunk, output_size, encoder, decoder, model_id, training_key_set, codes_inverse_freq, next_k_step,
-               n_iters, print_every=300):
+def trainIters(data, model, criterion, args):
     start = time.time()
     plot_losses = []
     print_loss_total = 0  # Reset every print_every
     plot_loss_total = 0  # Reset every plot_every
-    encoder_pathes = []
-    decoder_pathes = []
-    # elem_wise_connection.initWeight()
 
-    # sum_history = add_history(data_chunk[past_chunk],training_key_set,output_size)
-    # KNN_history = KNN_history_record1(sum_history, output_size, num_nearest_neighbors)
-    KNN_history = []
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98), eps=1e-11, weight_decay=0)
 
-    if optimizer_option == 1:
-        encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate)
-        decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
-    elif optimizer_option == 2:
-        # encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-09, weight_decay=0)
-        # encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=learning_rate, betas=(0.88, 0.95), eps=1e-08, weight_decay=0)
-        encoder_optimizer = torch.optim.Adam(encoder.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-11,
-                                             weight_decay=0)
-        decoder_optimizer = torch.optim.Adam(decoder.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-11,
-                                             weight_decay=0)
-    elif optimizer_option == 3:
-        encoder_optimizer = torch.optim.RMSprop(encoder.parameters(), lr=learning_rate, alpha=0.99, eps=1e-08,
-                                                weight_decay=0, momentum=0, centered=False)
-        decoder_optimizer = torch.optim.RMSprop(decoder.parameters(), lr=learning_rate, alpha=0.99, eps=1e-08,
-                                                weight_decay=0, momentum=0, centered=False)
-    elif optimizer_option == 4:
-        encoder_optimizer = torch.optim.Adadelta(encoder.parameters(), lr=learning_rate, rho=0.9, eps=1e-06,
-                                                 weight_decay=0)
-        decoder_optimizer = torch.optim.Adadelta(decoder.parameters(), lr=learning_rate, rho=0.9, eps=1e-06,
-                                                 weight_decay=0)
-
-    # training_pairs = [variablesFromPair(random.choice(pairs))
-    #                  for i in range(n_iters)]
-    # criterion = nn.NLLLoss()
     total_iter = 0
-    criterion = custom_MultiLabelLoss_torch()
-    for j in range(n_iters):
-        key_idx = np.random.permutation(len(training_key_set))
-        # key_idx = np.random.choice(len(training_key_set),n_iters)
-        training_keys = []
+    for epoch in range(args.n_iters):
 
-        for idx in key_idx:
-            training_keys.append(training_key_set[idx])
+        for j in tqdm(range(len(data))):
+            # (U, S, A, B, L1, L2, L3)
+            item = data[j]
+            optimizer.zero_grad()
+            logit = model(item)
+            loss = criterion(logit, item)
 
-            # criterion = custom_MultiLabelLoss_MSE()
-        # criterion = nn.MultiLabelSoftMarginLoss(size_average=False)
-        # criterion = nn.BCELoss()
-        weight_vector = []
+            loss.backward()
+            optimizer.step()
 
-        for iter in range(1, len(training_key_set) + 1):
-            # training_pair = training_pairs[iter - 1]
-            # input_variable = training_pair[0]
-            # target_variable = training_pair[1]
-            input_variable = data_chunk[past_chunk][training_keys[iter - 1]]
-            target_variable = data_chunk[future_chunk][training_keys[iter - 1]]
-
-            loss = train(input_variable, target_variable, encoder,
-                         decoder, codes_inverse_freq, encoder_optimizer, decoder_optimizer, criterion, output_size,
-                         next_k_step) # 竟然没分batch
-            print_loss_total += loss
-            plot_loss_total += loss
+            print_loss_total += loss.data.cpu().detach()
+            plot_loss_total += loss.data.cpu().detach()
 
             total_iter += 1
 
-        print_loss_avg = print_loss_total / len(training_key_set)
+        print_loss_avg = print_loss_total / len(data)
         print_loss_total = 0
-        print('%s (%d %d%%) %.6f' % (timeSince(start, total_iter / (n_iters * len(training_key_set))), total_iter, total_iter / (n_iters * len(training_key_set)) * 100,print_loss_avg))
+        print('%s (%d %d%%) %.6f' % (timeSince(start, total_iter / (args.n_iters * len(data))), total_iter, total_iter / (args.n_iters * len(data)) * 100, print_loss_avg))
 
-        filepath = './models/encoder' + (model_id) + '_model_epoch' + str(int(j))
-        encoder_pathes.append(filepath)
-        torch.save(encoder, filepath)
-        filepath = './models/decoder' + (model_id) + '_model_epoch' + str(int(j))
-        decoder_pathes.append(filepath)
-        torch.save(decoder, filepath)
-        print('Finish epoch: ' + str(j))
+        recall, ndcg, hr = evaluate(data, model, "valid", 20)
+        print(f"valid result: recall={recall}, ndcg={ndcg}, hr={hr}")
+
+        filepath = './models/' + (args.model_version) + '_model_epoch' + str(int(epoch))
+        torch.save(model, filepath)
+        # filepath = './models/decoder' + (args.model_version) + '_model_epoch' + str(int(epoch))
+        # torch.save(decoder, filepath)
+        print('Finish epoch: ' + str(epoch))
         print('Model is saved.')
         sys.stdout.flush()
     # showPlot(plot_losses)
@@ -821,7 +646,8 @@ def get_HT(groundtruth, pred_rank_list, k):
     return 0
 
 
-def evaluate(data_chunk, encoder, decoder, output_size, test_key_set, next_k_step, activate_codes_num):
+# def evaluate(data_chunk, encoder, decoder, output_size, test_key_set, next_k_step, activate_codes_num):
+def evaluate(data, model, mode, activate_codes_num):
     prec = []
     rec = []
     F = []
@@ -835,33 +661,42 @@ def evaluate(data_chunk, encoder, decoder, output_size, test_key_set, next_k_ste
     rec3 = []
     F3 = []
     length = np.zeros(3)
+    
 
     NDCG = []
     n_hit = 0
     count = 0
+    next_k_step = 1
+    TOPK = activate_codes_num
 
-    for iter in range(len(test_key_set)):
-        # training_pair = training_pairs[iter - 1]
-        # input_variable = training_pair[0]
-        # target_variable = training_pair[1]
-        input_variable = data_chunk[past_chunk][test_key_set[iter]]
-        target_variable = data_chunk[future_chunk][test_key_set[iter]]
+    if mode == "test":
+        dataset = data.CVR_dataset.test_dataset
+    elif mode == "valid":
+        dataset = data.CVR_dataset.valid_dataset
+    else:
+        print("error evaluate mode: " + mode)
+        return
 
-        if len(target_variable) < 2 + next_k_step:
-            continue
-        count += 1
-        output_vectors, prob_vectors = decoding_next_k_step(encoder, decoder, input_variable, target_variable,
-                                                            output_size, next_k_step, activate_codes_num)
+    for iter in tqdm(range(len(dataset))):
+        item = dataset[iter] # (U, S, A_busk, L)
+        targets = item[2]
+
+        pred_all = model.eval_all(item) # 1(next_k) * item_num(or random select 100)
+
+        topv, sorted_item = pred_all.data.cpu().detach().topk(TOPK)
+
+        # output_vectors, prob_vectors = decoding_next_k_step(encoder, decoder, input_variable, target_variable,
+        #                                                     output_size, next_k_step, activate_codes_num)
 
         hit = 0
-        for idx in range(len(output_vectors)):
+        for idx in range(len(sorted_item)):
             # for idx in [2]:
-            vectorized_target = np.zeros(output_size)
-            for ii in target_variable[1 + idx]:
+            vectorized_target = np.zeros(data.item_num)
+            for ii in targets:
                 vectorized_target[ii] = 1
 
-            vectorized_output = np.zeros(output_size)
-            for ii in output_vectors[idx]:
+            vectorized_output = np.zeros(data.item_num)
+            for ii in sorted_item[idx]:
                 vectorized_output[ii] = 1
 
             precision, recall, Fscore, correct = get_precision_recall_Fscore(vectorized_target, vectorized_output)
@@ -880,10 +715,11 @@ def evaluate(data_chunk, encoder, decoder, output_size, test_key_set, next_k_ste
                 prec3.append(precision)
                 rec3.append(recall)
                 F3.append(Fscore)
-            length[idx] += np.sum(target_variable[1 + idx])
-            target_topi = prob_vectors[idx]
-            hit += get_HT(vectorized_target, target_topi, activate_codes_num)
-            ndcg = get_NDCG(vectorized_target, target_topi, activate_codes_num)
+            # length[idx] += np.sum(target_variable[1 + idx])
+            # target_topi = prob_vectors[idx]
+            # pdb.set_trace()
+            hit += get_HT(vectorized_target, sorted_item[idx], activate_codes_num)
+            ndcg = get_NDCG(vectorized_target, sorted_item[idx], activate_codes_num)
             NDCG.append(ndcg)
         if hit == next_k_step:
             n_hit += 1
@@ -902,7 +738,7 @@ def evaluate(data_chunk, encoder, decoder, output_size, test_key_set, next_k_ste
     # print('average F score of 3rd' + ': ' + str(np.mean(F3)) + ' with std: ' + str(np.std(F3)))
     # print('average NDCG: ' + str(np.mean(NDCG)))
     # print('average hit rate: ' + str(n_hit / len(test_key_set)))
-    return np.mean(rec), np.mean(NDCG), n_hit / len(test_key_set)
+    return np.mean(rec), np.mean(NDCG), n_hit / len(dataset)
 
 def partition_the_data(data_chunk, key_set, next_k_step):
     filtered_key_set = []
@@ -948,76 +784,74 @@ def get_codes_frequency_no_vector(X, num_dim, key_set):
 def main(argv):
     args = config.args
 
-    data = BasketData("./my_data/Dunn/user_date_tran_dict_new.txt", args)
+    data = BasketData(args.data_path, args)
 
-    model_version = 'Dunn_0.001'
+    model_version = args.model_version
 
     directory = './models/'
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-    item_num = data.item_num
-
-    encoder1 = EncoderRNN_new(item_num, hidden_size, num_layers)
-    attn_decoder1 = AttnDecoderRNN_new(hidden_size, item_num, num_layers, dropout_p=0.1)
+    model = BasketABAModel(data.item_num, data.user_num, args)
+    # encoder = BucketEncoderTrans(item_num, hidden_size, num_layers)
+    # attn_decoder1 = AttnDecoderRNN_new(hidden_size, item_num, num_layers, dropout_p=0.1)
+    criterion = BucketABALoss()
 
     if use_cuda:
-        encoder1 = encoder1.cuda()
-        attn_decoder1 = attn_decoder1.cuda()
+        model = model.cuda()
+        criterion.cuda()
 
-    if training == 1:
-        if atten_decoder:
-            trainIters(data_chunk, input_size, encoder1, attn_decoder1, model_version, training_key_set, weights,
-                       next_k_step, num_iter, print_every=print_val)
+    if not args.only_test:
+        trainIters(data, model, criterion, args)
 
-    else:
-        for i in [20, 40]:
-            valid_recall = []
-            valid_ndcg = []
-            valid_hr = []
-            recall_list = []
-            ndcg_list = []
-            hr_list = []
-            print('k = ' + str(i))
-            for model_epoch in range(num_iter):
-                print('Epoch: ', model_epoch)
-                encoder_pathes = './models/encoder' + str(model_version) + '_model_epoch' + str(model_epoch)
-                decoder_pathes = './models/decoder' + str(model_version) + '_model_epoch' + str(model_epoch)
+    # test
+    for i in [20, 40]:
+        valid_recall = []
+        valid_ndcg = []
+        valid_hr = []
+        recall_list = []
+        ndcg_list = []
+        hr_list = []
+        print('k = ' + str(i))
+        for model_epoch in range(args.n_iters):
+            print('Epoch: ', model_epoch)
+            model_pathes = './models/' + str(model_version) + '_model_epoch' + str(model_epoch)
 
-                encoder_instance = torch.load(encoder_pathes)
-                decoder_instance = torch.load(decoder_pathes)
+            model_instance = torch.load(model_pathes)
 
-                recall, ndcg, hr = evaluate(data_chunk, encoder_instance, decoder_instance, input_size, validation_key_set, next_k_step, i)
-                valid_recall.append(recall)
-                valid_ndcg.append(ndcg)
-                valid_hr.append(hr)
-                recall, ndcg, hr = evaluate(data_chunk, encoder_instance, decoder_instance, input_size, test_key_set, next_k_step, i)
-                recall_list.append(recall)
-                ndcg_list.append(ndcg)
-                hr_list.append(hr)
-            valid_recall = np.asarray(valid_recall)
-            valid_ndcg = np.asarray(valid_ndcg)
-            valid_hr = np.asarray(valid_hr)
-            idx1 = valid_recall.argsort()[::-1][0]
-            idx2 = valid_ndcg.argsort()[::-1][0]
-            idx3 = valid_hr.argsort()[::-1][0]
-            print('max valid recall results:')
-            print('Epoch: ', idx1)
-            print('recall: ', recall_list[idx1])
-            print('ndcg: ', ndcg_list[idx1])
-            print('phr: ', hr_list[idx1])
+            recall, ndcg, hr = evaluate(data, model_instance, "test", i)
+            print(f"test recall={recall}, ndcg={ndcg}, hr={hr}")
+            valid_recall.append(recall)
+            valid_ndcg.append(ndcg)
+            valid_hr.append(hr)
+            recall, ndcg, hr = evaluate(data, model_instance, "valid", i)
+            print(f"valid recall={recall}, ndcg={ndcg}, hr={hr}")
+            recall_list.append(recall)
+            ndcg_list.append(ndcg)
+            hr_list.append(hr)
+        valid_recall = np.asarray(valid_recall)
+        valid_ndcg = np.asarray(valid_ndcg)
+        valid_hr = np.asarray(valid_hr)
+        idx1 = valid_recall.argsort()[::-1][0]
+        idx2 = valid_ndcg.argsort()[::-1][0]
+        idx3 = valid_hr.argsort()[::-1][0]
+        print('max valid recall results:')
+        print('Epoch: ', idx1)
+        print('recall: ', recall_list[idx1])
+        print('ndcg: ', ndcg_list[idx1])
+        print('phr: ', hr_list[idx1])
 
-            print('max valid ndcg results:')
-            print('Epoch: ', idx2)
-            print('recall: ', recall_list[idx2])
-            print('ndcg: ', ndcg_list[idx2])
-            print('phr: ', hr_list[idx2])
+        print('max valid ndcg results:')
+        print('Epoch: ', idx2)
+        print('recall: ', recall_list[idx2])
+        print('ndcg: ', ndcg_list[idx2])
+        print('phr: ', hr_list[idx2])
 
-            print('max valid phr results:')
-            print('Epoch: ', idx3)
-            print('recall: ', recall_list[idx3])
-            print('ndcg: ', ndcg_list[idx3])
-            print('phr: ', hr_list[idx3])
+        print('max valid phr results:')
+        print('Epoch: ', idx3)
+        print('recall: ', recall_list[idx3])
+        print('ndcg: ', ndcg_list[idx3])
+        print('phr: ', hr_list[idx3])
 
 if __name__ == '__main__':
     main(sys.argv)

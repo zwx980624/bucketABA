@@ -21,6 +21,23 @@ class BasketData(Dataset):
         self.max_basket_num = args.max_basket_num
         self.max_basket_size = args.max_basket_size
         self.user_basket_item_dict = dict()
+
+        item_set = set()
+        print("userid:", max(self.user_basket_item_dict_old.keys()), len(self.user_basket_item_dict_old))
+        max_item_id = 0
+        for userid in self.user_basket_item_dict_old.keys():
+            seq = self.user_basket_item_dict_old[userid]
+            for b_id, basket in enumerate(seq):
+                for item in basket:
+                    item_set.add(item)
+                    if max_item_id < item:
+                        max_item_id = item
+        print("itemid:", max_item_id, len(item_set))
+        # pdb.set_trace()
+        self.item_num = max_item_id + 2
+        self.user_num = max(self.user_basket_item_dict_old.keys()) + 2
+        self.item_pad = max_item_id + 1
+
         # 先截断
         for userid in self.user_basket_item_dict_old.keys():
             seq = self.user_basket_item_dict_old[userid]
@@ -31,18 +48,25 @@ class BasketData(Dataset):
                 if len(basket) > self.max_basket_size:
                     seq[b_id] = basket[-self.max_basket_size:]
             self.user_basket_item_dict[userid] = seq
+        
+        
         # 划分训练测试集
         self.train_userid_list = list(self.user_basket_item_dict.keys())[:math.ceil(0.9 * len(list(self.user_basket_item_dict.keys())))]
         # CVR_data
         
         print("generating instance")
         self.CVR_dataset, self.CVABR_dataset, self.CVBCVAR_dataset, self.neg_sample_pool = self.create_instance()
+        
         self.random_instance_balance()
         # pdb.set_trace()
         print('done')
     
     def __getitem__(self, idx):
-        ret = self.sampled_train_comb[idx*self.args.batch_size: (idx+1)*self.args.batch_size]
+        # if (idx == 0):
+        #     pdb.set_trace()
+        # if (idx >= self.__len__()):
+        #     pdb.set_trace()
+        ret = self.sampled_train_comb[(idx)*self.args.batch_size: (idx+1)*self.args.batch_size]
         # group一下
         U = [_[0] for _ in ret]
         S = [_[1] for _ in ret]
@@ -51,10 +75,12 @@ class BasketData(Dataset):
         L1 = [_[4] for _ in ret]
         L2 = [_[5] for _ in ret]
         L3 = [_[6] for _ in ret]
+        if (len(U) == 0):
+            pdb.set_trace()
         return (U, S, A, B, L1, L2, L3)
 
     def __len__(self):
-        return len(self.sampled_train_comb) // self.args.batch_size
+        return (len(self.sampled_train_comb) // self.args.batch_size)
 
 
         
@@ -63,9 +89,9 @@ class BasketData(Dataset):
         CVABR_num = len(self.CVABR_dataset.train_dataset)
         CVBCVAR_num = len(self.CVBCVAR_dataset.train_dataset)
 
-        CVR_sample_rate = args.CVR_sample_rate
-        CVABR_balance = args.CVABR_balance
-        CVBCVAR_balance = args.CVBCVAR_balance
+        CVR_sample_rate = self.args.CVR_sample_rate
+        CVABR_balance = self.args.CVABR_balance
+        CVBCVAR_balance = self.args.CVBCVAR_balance
 
         new_CVR_num = int(CVR_num * CVR_sample_rate)
         new_CVABR_num = int(new_CVR_num * CVABR_balance)
@@ -128,7 +154,7 @@ class BasketData(Dataset):
                         basket = basket[-self.max_basket_size:]
                     else:
                         padd_num = self.max_basket_size - len(basket)
-                        padding_item = [-1] * padd_num
+                        padding_item = [self.item_pad] * padd_num
                         basket = basket + padding_item
                     history.append(basket)
                     if len(history) == 1: continue
@@ -170,7 +196,7 @@ class BasketData(Dataset):
                         basket = basket[-self.max_basket_size:]
                     else:
                         padd_num = self.max_basket_size - len(basket)
-                        padding_item = [-1] * padd_num
+                        padding_item = [self.item_pad] * padd_num
                         basket = basket + padding_item
                     history.append(basket)
                 U = userid
@@ -192,7 +218,7 @@ class BasketData(Dataset):
                         basket = basket[-self.max_basket_size:]
                     else:
                         padd_num = self.max_basket_size - len(basket)
-                        padding_item = [-1] * padd_num
+                        padding_item = [self.item_pad] * padd_num
                         basket = basket + padding_item
                     history.append(basket)
                     if len(history) == 1: continue
@@ -216,11 +242,13 @@ class BasketData(Dataset):
 
 if __name__ == "__main__":
     args = config.args
-    ds = BasketData("./my_data/Dunn/user_date_tran_dict_new.txt", args)
-    for x in ds:
-        print(x)
-        pdb.set_trace()
-        print("ok")
+    ds = BasketData("./my_data/Dunn/user_date_tran_dict_new_small.txt", args)
+    print(len(ds))
+    for i in range(len(ds)):
+        item = ds[i]
+        print(i)
+        # pdb.set_trace()
+        # print("ok")
     # a = SubDataSet()
     # b = SubDataSet()
     # a.train_dataset.append(1)
